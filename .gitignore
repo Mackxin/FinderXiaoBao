@@ -9,3 +9,6 @@ FinderGoUp.app/
 
 # 本机运行时生成的日志
 *.log
+
+# 本地打包的 Release 附件（手动上传到 GitHub Releases，不入库）
+*.zip
