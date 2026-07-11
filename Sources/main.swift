@@ -29,15 +29,8 @@ func writeLog(_ message: String) {
     fputs(line, stderr)
 }
 
-// MARK: - 触发方式
+// MARK: - 偏好键
 
-private enum TriggerMode: String {
-    case doubleClick = "doubleClick"
-    case singleClick = "singleClick"
-    case longPress  = "longPress"
-}
-
-private let kTriggerMode   = "triggerMode"
 private let kOnlyIconView = "onlyIconView"
 
 // MARK: - 主应用代理
@@ -48,28 +41,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
-    // 点击状态
+    // 双击检测状态
     private var lastClickTime: TimeInterval = 0
     private var lastClickLoc: CGPoint = .zero
-    private var downTime: TimeInterval = 0
-    private var downLoc: CGPoint = .zero
-    private var lastSingleClickTime: TimeInterval = 0
-    private var longPressTimer: Timer?
 
     private var doubleClickThreshold: TimeInterval { NSEvent.doubleClickInterval }
     private var doubleClickMoveTolerance: CGFloat = 6.0
-    private var longPressDuration: TimeInterval = 0.5
 
     private var isEnabled = true
 
     // 偏好（持久化到 UserDefaults）
-    private var triggerMode: TriggerMode {
-        get {
-            let raw = UserDefaults.standard.string(forKey: kTriggerMode) ?? ""
-            return TriggerMode(rawValue: raw) ?? .doubleClick
-        }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: kTriggerMode) }
-    }
     private var onlyIconView: Bool {
         get { UserDefaults.standard.bool(forKey: kOnlyIconView) }
         set { UserDefaults.standard.set(newValue, forKey: kOnlyIconView) }
@@ -77,7 +58,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // 菜单项引用
     private var enabledMenuItem: NSMenuItem?
-    private var triggerModeItems: [NSMenuItem] = []
     private var onlyIconViewMenuItem: NSMenuItem?
     private var loginItemMenuItem: NSMenuItem?
 
@@ -87,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         writeLog("🚀 \(APP_NAME) 启动")
         writeLog("📐 双击阈值: \(doubleClickThreshold)s (系统默认), 位移容忍度: \(doubleClickMoveTolerance)pt")
         writeLog("🔒 辅助功能信任: \(AXIsProcessTrusted())")
-        writeLog("🎯 触发方式: \(triggerMode.rawValue), 仅图标视图: \(onlyIconView)")
+        writeLog("🎯 触发方式: 双击（固定）, 仅图标视图: \(onlyIconView)")
         writeLog("📁 日志文件: \(logFileURL.path)")
 
         requestNotificationAuth()
@@ -97,7 +77,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        longPressTimer?.invalidate()
         if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
         writeLog("🛑 \(APP_NAME) 退出")
     }
@@ -140,24 +119,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(enabledMenuItem!)
         menu.addItem(.separator())
 
-        // 触发方式子菜单
-        let triggerSub = NSMenuItem(title: "触发方式", action: nil, keyEquivalent: "")
-        let subMenu = NSMenu()
-        let modes: [(TriggerMode, String)] = [
-            (.doubleClick, "双击（默认）"),
-            (.singleClick, "单击"),
-            (.longPress,  "长按")
-        ]
-        for (mode, label) in modes {
-            let item = NSMenuItem(title: label, action: #selector(setTriggerMode(_:)), keyEquivalent: "")
-            item.representedObject = mode.rawValue
-            subMenu.addItem(item)
-            triggerModeItems.append(item)
-        }
-        triggerSub.submenu = subMenu
-        menu.addItem(triggerSub)
-        updateTriggerModeMenu()
-
         onlyIconViewMenuItem = NSMenuItem(title: "仅图标视图生效", action: #selector(toggleOnlyIconView), keyEquivalent: "")
         onlyIconViewMenuItem?.state = onlyIconView ? .on : .off
         menu.addItem(onlyIconViewMenuItem!)
@@ -185,23 +146,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isEnabled.toggle()
         enabledMenuItem?.title = isEnabled ? "已启用" : "已停用"
         writeLog("⏯️ 功能\(isEnabled ? "启用" : "停用")")
-    }
-
-    @objc private func setTriggerMode(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let mode = TriggerMode(rawValue: raw) else { return }
-        triggerMode = mode
-        updateTriggerModeMenu()
-        writeLog("🎯 触发方式已切换: \(mode.rawValue)")
-        showNotification("触发方式", mode == .doubleClick ? "双击空白处返回上一级" :
-                         (mode == .singleClick ? "单击空白处返回上一级" : "长按空白处返回上一级"))
-    }
-
-    private func updateTriggerModeMenu() {
-        let cur = triggerMode.rawValue
-        for item in triggerModeItems {
-            item.state = (item.representedObject as? String == cur) ? .on : .off
-        }
     }
 
     @objc private func toggleOnlyIconView() {
@@ -238,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = APP_NAME
         alert.informativeText = """
-        在访达（Finder）窗口空白处 \(triggerMode == .doubleClick ? "双击" : (triggerMode == .singleClick ? "单击" : "长按")) → 返回上一级。
+        在访达（Finder）窗口空白处双击 → 返回上一级。
 
         日志位置：\(logFileURL.path)
         """
@@ -290,9 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: 事件监听
 
     private func setupEventTap() {
-        let mask = (CGEventMask(1) << CGEventType.leftMouseDown.rawValue) |
-                   (CGEventMask(1) << CGEventType.leftMouseUp.rawValue) |
-                   (CGEventMask(1) << CGEventType.leftMouseDragged.rawValue)
+        let mask = (CGEventMask(1) << CGEventType.leftMouseDown.rawValue)
 
         guard let tap = CGEvent.tapCreate(
             tap: .cghidEventTap,
@@ -309,41 +251,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 switch type {
                 case .leftMouseDown:
-                    app.longPressTimer?.invalidate(); app.longPressTimer = nil
-                    app.downTime = now
-                    app.downLoc = loc
-                    if app.triggerMode == .doubleClick {
-                        if now - app.lastClickTime < app.doubleClickThreshold &&
-                            hypot(loc.x - app.lastClickLoc.x, loc.y - app.lastClickLoc.y) < app.doubleClickMoveTolerance {
-                            app.lastClickTime = 0
-                            writeLog("🖱️ 检测到双击 at (\(Int(loc.x)), \(Int(loc.y)))")
-                            app.handleTrigger(at: loc)
-                        } else {
-                            app.lastClickTime = now
-                            app.lastClickLoc = loc
-                        }
-                    } else if app.triggerMode == .longPress {
-                        let p = app.downLoc
-                        app.longPressTimer = Timer.scheduledTimer(withTimeInterval: app.longPressDuration, repeats: false) { [weak app] _ in
-                            app?.handleTrigger(at: p)
-                        }
+                    if now - app.lastClickTime < app.doubleClickThreshold &&
+                        hypot(loc.x - app.lastClickLoc.x, loc.y - app.lastClickLoc.y) < app.doubleClickMoveTolerance {
+                        app.lastClickTime = 0
+                        writeLog("🖱️ 检测到双击 at (\(Int(loc.x)), \(Int(loc.y)))")
+                        app.handleTrigger(at: loc)
+                    } else {
+                        app.lastClickTime = now
+                        app.lastClickLoc = loc
                     }
-                case .leftMouseUp:
-                    app.longPressTimer?.invalidate(); app.longPressTimer = nil
-                    if app.triggerMode == .singleClick {
-                        let moved = hypot(loc.x - app.downLoc.x, loc.y - app.downLoc.y)
-                        let dur = now - app.downTime
-                        if moved < app.doubleClickMoveTolerance && dur < app.doubleClickThreshold {
-                            // 去抖：避免一次「双击」被当作两次「单击」而连跳两级
-                            if now - app.lastSingleClickTime >= app.doubleClickThreshold {
-                                app.lastSingleClickTime = now
-                                writeLog("🖱️ 检测到单击 at (\(Int(loc.x)), \(Int(loc.y)))")
-                                app.handleTrigger(at: loc)
-                            }
-                        }
-                    }
-                case .leftMouseDragged:
-                    app.longPressTimer?.invalidate(); app.longPressTimer = nil
                 default:
                     break
                 }
