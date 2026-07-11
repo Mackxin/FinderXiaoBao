@@ -1,0 +1,13 @@
+# 行尾统一（macOS 项目，文本文件统一使用 LF）
+* text=auto eol=lf
+
+# 明确按文本处理
+*.swift text
+*.md text
+*.sh text eol=lf
+*.plist text
+
+# 二进制资源（如后续加入图标），不参与差异比对与合并
+*.png binary
+*.icns binary
+*.app binary
