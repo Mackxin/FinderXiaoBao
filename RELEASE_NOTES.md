@@ -28,7 +28,7 @@ bash build.sh
 
 **方式二：下载预编译版本（Release 附件）**
 
-1. 在本仓库 **Releases** 页面下载 `访达小宝.app.zip`；
+1. 在本仓库 **Releases** 页面下载 `app.zip`；
 2. 解压得到 `访达小宝.app`；
 3. 首次打开请 **右键 → 打开**（ad-hoc 签名会被 Gatekeeper 拦截，需手动确认一次），或在终端执行：
    ```bash
