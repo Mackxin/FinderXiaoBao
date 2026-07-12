@@ -47,8 +47,8 @@
 
 **步骤：**
 ```bash
-git clone <你的仓库地址>
-cd FinderGoUp          # 即克隆后的项目根目录
+git clone https://github.com/Mackxin/FinderXiaoBao.git
+cd FinderXiaoBao       # 即克隆后的项目根目录
 bash build.sh
 ```
 脚本会用 `swiftc` 编译出 `访达小宝.app`（Apple 芯片 + Intel 通用二进制，已 **ad-hoc 签名**）。

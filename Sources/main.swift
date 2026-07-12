@@ -14,24 +14,31 @@ private let logFileURL: URL = {
     return dir.appendingPathComponent("\(APP_NAME)/debug.log")
 }()
 
-func writeLog(_ message: String) {
-    let timestamp = ISO8601DateFormatter().string(from: Date())
-    let line = "[\(timestamp)] \(message)\n"
-    try? FileManager.default.createDirectory(at: logFileURL.deletingLastPathComponent(),
-                                             withIntermediateDirectories: true)
-    if let handle = FileHandle(forWritingAtPath: logFileURL.path) {
-        handle.seekToEndOfFile()
-        handle.write(Data(line.utf8))
-        handle.closeFile()
-    } else {
-        try? line.write(to: logFileURL, atomically: true, encoding: .utf8)
+/// 日志写盘放到独立串行队列，避免阻塞事件回调所在的主线程（CGEvent tap 回调里也用 writeLog）。
+private let logQueue = DispatchQueue(label: "com.workbuddy.finderxiaobao.log")
+
+/// 启动即打开一次文件句柄并缓存，避免每次写日志都 createDirectory + 重新开句柄。
+private let logFileHandle: FileHandle? = {
+    let dir = logFileURL.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    if !FileManager.default.fileExists(atPath: logFileURL.path) {
+        try? "".write(to: logFileURL, atomically: true, encoding: .utf8)
     }
+    let fh = try? FileHandle(forWritingTo: logFileURL)
+    fh?.seekToEndOfFile()
+    return fh
+}()
+
+func writeLog(_ message: String) {
+    let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
     fputs(line, stderr)
+    logQueue.async { logFileHandle?.write(Data(line.utf8)) }
 }
 
 // MARK: - 偏好键
 
 private let kOnlyIconView = "onlyIconView"
+private let kAccessibilityPrompted = "accessibilityPrompted"
 
 // MARK: - 主应用代理
 
@@ -107,9 +114,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "arrow.up.circle.fill",
-                                   accessibilityDescription: APP_NAME)
-            button.image?.isTemplate = true
+            if let image = NSImage(contentsOfFile: Bundle.main.path(forResource: "StatusIcon", ofType: "png") ?? "") {
+                image.size = NSSize(width: 18, height: 18)
+                image.isTemplate = false
+                button.image = image
+            } else {
+                button.image = NSImage(systemSymbolName: "arrow.up.circle.fill",
+                                       accessibilityDescription: APP_NAME)
+                button.image?.isTemplate = true
+            }
         }
 
         let menu = NSMenu()
@@ -205,30 +218,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: 权限检查
 
     private func ensureAccessibilityPermission() {
-        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        let opts: CFDictionary = [promptKey: true] as CFDictionary
-        guard AXIsProcessTrustedWithOptions(opts) else {
-            writeLog("⚠️ 辅助功能未授权，自动打开设置面板并提示")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                NSApp.activate(ignoringOtherApps: true)
-                self.openAccessibilitySettings()
-                let alert = NSAlert()
-                alert.messageText = "需要辅助功能权限"
-                alert.informativeText = """
-                本应用需要「辅助功能」权限才能监听鼠标操作。
-
-                请在弹出的系统设置中勾选「\(APP_NAME)」，
-                然后【完全退出本应用并重新打开】才能生效。
-
-                ⚠️ 若之前已勾选过但仍无效，请先在设置里把 \(APP_NAME) 移除，
-                再重新勾选并重启（每次重新编译会使旧授权失效）。
-                """
-                alert.addButton(withTitle: "知道了")
-                alert.runModal()
-            }
+        // 先用不带 prompt 的方法检查，避免每次启动都触发系统弹窗。
+        guard !AXIsProcessTrusted() else {
+            writeLog("✅ 辅助功能权限已授予")
             return
         }
-        writeLog("✅ 辅助功能权限已授予")
+
+        writeLog("⚠️ 辅助功能未授权")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+
+            // 已提示过一次，就不再反复弹窗打扰用户。
+            if UserDefaults.standard.bool(forKey: kAccessibilityPrompted) {
+                writeLog("⚠️ 辅助功能未授权，已提示过，本次不再弹窗")
+                return
+            }
+
+            // 首次未授权：弹出系统授权提示、打开设置页、显示说明弹窗，并记录已提示。
+            UserDefaults.standard.set(true, forKey: kAccessibilityPrompted)
+            let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            let opts: CFDictionary = [promptKey: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(opts)
+
+            NSApp.activate(ignoringOtherApps: true)
+            self.openAccessibilitySettings()
+            let alert = NSAlert()
+            alert.messageText = "需要辅助功能权限"
+            alert.informativeText = """
+            本应用需要「辅助功能」权限才能监听鼠标操作。
+
+            请在弹出的系统设置中勾选「\(APP_NAME)」，
+            然后【完全退出本应用并重新打开】才能生效。
+
+            ⚠️ 若之前已勾选过但仍无效，请先在设置里把 \(APP_NAME) 移除，
+            再重新勾选并重启（每次重新编译会使旧授权失效）。
+            """
+            alert.addButton(withTitle: "知道了")
+            alert.runModal()
+        }
     }
 
     // MARK: 事件监听
@@ -334,15 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         writeLog("✅ 判定为空白处！执行返回...")
-
-        if onlyIconView {
-            if let view = currentFinderView(), view != "icon view" {
-                writeLog("⏭️ 仅图标视图模式，当前视图=\(view)，跳过")
-                return
-            }
-        }
-
-        goUpInFinder()
+        goUpInFinder(requireIconView: onlyIconView)
     }
 
     /// 文件/文件夹本身的 Accessibility 角色，命中这些说明落在文件上，应让访达正常打开。
@@ -380,22 +399,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// 查询访达最前窗口的视图模式：icon view / list view / column view / cover flow view
-    private func currentFinderView() -> String? {
-        let script = "tell application \"Finder\" to current view of front window"
-        guard let appleScript = NSAppleScript(source: script) else { return nil }
-        var err: NSDictionary?
-        let r = appleScript.executeAndReturnError(&err)
-        if let err { writeLog("⚠️ 查询视图失败: \(err)"); return nil }
-        return r.stringValue
-    }
-
-    private func goUpInFinder() {
+    /// 返回上一级。requireIconView 为 true 时，仅在「图标视图」下才执行（其余视图直接跳过），
+    /// 视图判断与导航合并在同一次 AppleScript 调用内完成，省去额外的进程间查询。
+    private func goUpInFinder(requireIconView: Bool = false) {
+        let viewGuard = requireIconView
+            ? "\n                if (current view of w) is not icon view then return \"wrong_view\""
+            : ""
         let script = """
         tell application "Finder"
             if (count of windows) > 0 then
                 try
-                    set w to front window
+                    set w to front window\(viewGuard)
                     set curView to current view of w
                     set t to target of w
                     set c to container of t
@@ -433,6 +447,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 showNotification("已在最顶层", "已经是根目录，无法再返回", sound: true)
             } else if s == "no_window" {
                 showNotification("无窗口", "当前没有访达窗口")
+            } else if s == "wrong_view" {
+                writeLog("⏭️ 仅图标视图模式，当前非图标视图，跳过")
             } else if s.hasPrefix("error:") {
                 showNotification("执行失败", String(s.dropFirst(6)))
             }

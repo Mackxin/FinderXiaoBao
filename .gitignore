@@ -1,14 +1,14 @@
-# 编译产物（不应提交到仓库）
-*.app/
+# 构建产物
 build/
-访达小宝.app/
-FinderGoUp.app/
+访达小宝.app
+访达小宝.app.zip
 
-# macOS 系统文件
+# macOS 元数据
 .DS_Store
 
-# 本机运行时生成的日志
-*.log
+# 项目内部数据（含 memory 笔记，不入库）
+.workbuddy/
 
-# 本地打包的 Release 附件（手动上传到 GitHub Releases，不入库）
-*.zip
+# 编辑器
+*.swp
+.*.swp
